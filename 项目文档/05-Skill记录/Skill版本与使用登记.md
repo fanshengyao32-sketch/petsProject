@@ -5,7 +5,7 @@
 | 名称 | 类型 | 版本 | 文件 | 当前状态 |
 | --- | --- | --- | --- | --- |
 | `pet-booking-business-check` | 业务专项 Skill | v0.1 | `.agents/skills/预约业务规则检查/SKILL.md` | 已实际调用 18 次，最新报告 `BIZ-CHECK-20261112-18.md` |
-| `pet-booking-acceptance-check` | 验收检查 Skill | v0.1 | `.agents/skills/题目验收检查/SKILL.md` | 已实际调用 4 次（T33、T34、T35、T37），最新报告 `项目文档/05-Skill记录/ACC-CHECK-20261112-02.md` |
+| `pet-booking-acceptance-check` | 验收检查 Skill | v0.1 | `.agents/skills/题目验收检查/SKILL.md` | 已实际调用 5 次（T33、T34、T35、T37、T38），最新报告 `项目文档/05-Skill记录/ACC-CHECK-20261112-03.md` |
 
 ## 创建说明
 
@@ -311,3 +311,16 @@
 - 输出：`项目文档/05-Skill记录/ACC-CHECK-20261112-02.md`、`项目文档/09-CI与发布/T37草稿PR创建记录.md`、GitHub PR `#1`
 - 实际帮助：避免因 Codex 交互表单未提交而误报 PR 已创建，并避免将草稿 PR 创建错误解释为整题或发布门禁通过
 - 局限：本次不转为 Ready、不合并、不部署；最终 PR head 的必需检查仍须真实完成
+
+## 验收 Skill 调用 5：T38 合并前后检查
+
+- 日期：2026-11-12
+- 阶段/任务：T38 PR 合并与 main 重新门禁
+- 版本：PR head `fdce2dd07023d3893d5958e5bdcd3d0dce2ae643`；merge commit `6c45883b04851047e5e59412f983096d829df768`
+- 使用原因：Skill 明确要求 PR 合并前检查，且题面要求不能用开发分支旧结果替代 main 实际提交门禁
+- 输入：原始题面、T34～T37 证据、PR 状态与两次检查、main 保护、学生确认、合并结果、main Actions `#6`
+- 实际过程：固定 PR head；核查无冲突、22 个提交、两次 CI 和保护规则；转为 Ready；使用 merge commit 合并；等待 main 实际提交重新完成全部门禁
+- 复查结果：PR 合并及 main `#6` 均通过；工作项、MCP 建仓、正式部署和最终交付材料缺口继续保留
+- 输出：`项目文档/05-Skill记录/ACC-CHECK-20261112-03.md`、`项目文档/09-CI与发布/T38合并与主分支重新门禁记录.md`
+- 实际帮助：避免合并后直接沿用 PR 结果，强制在 merge SHA 上重新执行 MySQL、覆盖率、race 和构建
+- 局限：没有教学部署目标，本次不执行 T39；合并成功不代表整题通过
