@@ -84,7 +84,7 @@ func TestApplicationAssemblyAndExpirationWorker(t *testing.T) {
 		PaymentCallbackURL:    "http://127.0.0.1:8080/api/payment/notifications/mock",
 		PaymentCallbackSecret: "secret",
 	}
-	application := newApplication(db, appConfig, clock.Fixed{Time: time.Now().UTC()}, template.New("test"))
+	application := newApplication(db, appConfig, clock.Fixed{Time: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)}, template.New("test"))
 	require.NotNil(t, application.bookingService)
 
 	response := httptest.NewRecorder()
@@ -112,7 +112,7 @@ func TestExpirationWorkerProcessesTick(t *testing.T) {
 	db, err := database.OpenMySQL(context.Background(), dsn)
 	require.NoError(t, err)
 	defer db.Close()
-	service := booking.NewService(db.GORM, clock.Fixed{Time: time.Now().UTC()})
+	service := booking.NewService(db.GORM, clock.Fixed{Time: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := startExpirationWorker(ctx, service, time.Millisecond)
 	time.Sleep(20 * time.Millisecond)

@@ -133,6 +133,7 @@ func TestWriteErrorMappings(t *testing.T) {
 		{ErrDuplicateActive, http.StatusConflict, "DUPLICATE_ACTIVE_BOOKING"},
 		{ErrSlotStarted, http.StatusConflict, "INVALID_STATE"},
 		{ErrPetNotOwned, http.StatusForbidden, "FORBIDDEN"},
+		{ErrTemporarilyBusy, http.StatusServiceUnavailable, "SERVICE_BUSY"},
 	}
 	for _, test := range tests {
 		response := httptest.NewRecorder()
@@ -160,6 +161,7 @@ func TestBusinessErrorMessage(t *testing.T) {
 		{ErrSlotOverlap, "该服务时段与已有时段重叠"},
 		{ErrInvalidRequest, "请求参数不正确"},
 		{ErrInvalidSlotTime, "结束时间必须晚于开始时间，且开始时间必须在未来"},
+		{ErrTemporarilyBusy, "预约服务繁忙，请稍后重试"},
 		{errors.New("database unavailable"), "系统暂时无法处理该操作，请稍后重试"},
 	}
 	for _, test := range tests {

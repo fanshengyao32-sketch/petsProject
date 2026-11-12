@@ -186,6 +186,69 @@ func TestMySQLCapacityIdempotencyReleaseAndExpiry(t *testing.T) {
 	})
 }
 
+func TestExpiryWorkerAndBookingCreationUseConsistentLockOrder(t *testing.T) {
+	db := integrationDB(t)
+	ctx := context.Background()
+	now := time.Date(2026, 11, 12, 4, 0, 0, 0, time.UTC)
+	service := NewService(db, fixedClock{value: now})
+
+	for round := 0; round < 20; round++ {
+		clearTestBookings(t, db)
+		expired := Booking{
+			BookingNo: "BK-EXPIRED-LOCK-" + string(rune('A'+round)), RequestKey: "expired-lock-" + string(rune('A'+round)),
+			SlotID: 1, OwnerID: 1, PetID: 1, AmountCents: PriceCents, Status: StatusPendingPayment,
+			HoldExpiresAt: now.Add(-time.Minute),
+		}
+		require.NoError(t, db.Create(&expired).Error)
+
+		start := make(chan struct{})
+		errorsCh := make(chan error, 5)
+		var wait sync.WaitGroup
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			errorsCh <- service.ExpireHolds(ctx)
+		}()
+		for index, ownerID := range []uint64{1, 7, 8, 9} {
+			wait.Add(1)
+			go func(index int, ownerID uint64) {
+				defer wait.Done()
+				<-start
+				_, err := service.CreateBooking(ctx, CreateBookingInput{
+					OwnerID: ownerID, PetID: uint64(index + 1), SlotID: 1,
+					RequestKey: "expiry-create-" + string(rune('A'+round)) + "-" + string(rune('a'+index)),
+				})
+				errorsCh <- err
+			}(index, ownerID)
+		}
+		close(start)
+		wait.Wait()
+		close(errorsCh)
+
+		var success, capacityFull int
+		for err := range errorsCh {
+			switch {
+			case err == nil:
+				success++
+			case errors.Is(err, ErrCapacityFull):
+				capacityFull++
+			default:
+				t.Fatalf("round %d returned unstable error: %v", round, err)
+			}
+		}
+		require.Equal(t, 4, success, "expiry worker plus three successful bookings")
+		require.Equal(t, 1, capacityFull)
+
+		var occupying int64
+		require.NoError(t, db.Model(&Booking{}).Where("slot_id = ? AND status IN ?", 1, occupyingStatuses).Count(&occupying).Error)
+		require.EqualValues(t, 3, occupying)
+		var expiredCount int64
+		require.NoError(t, db.Model(&Booking{}).Where("id = ? AND status = ? AND capacity_released_at IS NOT NULL", expired.ID, StatusExpired).Count(&expiredCount).Error)
+		require.EqualValues(t, 1, expiredCount)
+	}
+}
+
 func TestMySQLConcurrentOverlappingSlotCreation(t *testing.T) {
 	db := integrationDB(t)
 	require.NoError(t, db.Exec("DELETE FROM service_slots WHERE id > 3").Error)
