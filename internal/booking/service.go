@@ -98,68 +98,71 @@ func (s *Service) CreateBooking(ctx context.Context, input CreateBookingInput) (
 		return Booking{}, ErrInvalidRequest
 	}
 	var result Booking
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var existing Booking
-		err := tx.Where("owner_id = ? AND request_key = ?", input.OwnerID, input.RequestKey).First(&existing).Error
-		if err == nil {
-			if existing.PetID != input.PetID || existing.SlotID != input.SlotID {
-				return ErrInvalidRequest
+	err := withMySQLTransactionRetry(ctx, func() error {
+		result = Booking{}
+		return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			var existing Booking
+			err := tx.Where("owner_id = ? AND request_key = ?", input.OwnerID, input.RequestKey).First(&existing).Error
+			if err == nil {
+				if existing.PetID != input.PetID || existing.SlotID != input.SlotID {
+					return ErrInvalidRequest
+				}
+				result = existing
+				return nil
 			}
-			result = existing
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("find idempotent booking: %w", err)
+			}
+
+			var slot ServiceSlot
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&slot, input.SlotID).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return ErrSlotNotFound
+				}
+				return fmt.Errorf("lock slot: %w", err)
+			}
+			now := s.clock.Now().UTC()
+			if !slot.StartsAt.After(now) {
+				return ErrSlotStarted
+			}
+			if err := expireHolds(tx, now, slot.ID); err != nil {
+				return err
+			}
+
+			var pet Pet
+			if err := tx.First(&pet, input.PetID).Error; err != nil || pet.OwnerID != input.OwnerID {
+				return ErrPetNotOwned
+			}
+			// This must be a locking read. Under MySQL REPEATABLE READ a plain COUNT
+			// can keep the snapshot created by the idempotency lookup and miss a
+			// booking committed while this transaction waited for the slot lock.
+			var occupiedBookings []Booking
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("slot_id = ? AND status IN ?", slot.ID, occupyingStatuses).
+				Find(&occupiedBookings).Error; err != nil {
+				return fmt.Errorf("count capacity: %w", err)
+			}
+			if len(occupiedBookings) >= slot.Capacity {
+				return ErrCapacityFull
+			}
+
+			booking := Booking{
+				BookingNo: newBookingNo(now, input.OwnerID, input.RequestKey), RequestKey: input.RequestKey,
+				SlotID: slot.ID, OwnerID: input.OwnerID, PetID: input.PetID, AmountCents: PriceCents,
+				Status: StatusPendingPayment, HoldExpiresAt: now.Add(5 * time.Minute),
+			}
+			if err := tx.Create(&booking).Error; err != nil {
+				var mysqlErr *mysql.MySQLError
+				if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
+					// MySQL may report either unique index first. Resolve the exact
+					// meaning after rollback by looking up the request key.
+					return errUniqueRace
+				}
+				return fmt.Errorf("create booking: %w", err)
+			}
+			result = booking
 			return nil
-		}
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return fmt.Errorf("find idempotent booking: %w", err)
-		}
-
-		var slot ServiceSlot
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&slot, input.SlotID).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrSlotNotFound
-			}
-			return fmt.Errorf("lock slot: %w", err)
-		}
-		now := s.clock.Now().UTC()
-		if !slot.StartsAt.After(now) {
-			return ErrSlotStarted
-		}
-		if err := expireHolds(tx, now, slot.ID); err != nil {
-			return err
-		}
-
-		var pet Pet
-		if err := tx.First(&pet, input.PetID).Error; err != nil || pet.OwnerID != input.OwnerID {
-			return ErrPetNotOwned
-		}
-		// This must be a locking read. Under MySQL REPEATABLE READ a plain COUNT
-		// can keep the snapshot created by the idempotency lookup and miss a
-		// booking committed while this transaction waited for the slot lock.
-		var occupiedBookings []Booking
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("slot_id = ? AND status IN ?", slot.ID, occupyingStatuses).
-			Find(&occupiedBookings).Error; err != nil {
-			return fmt.Errorf("count capacity: %w", err)
-		}
-		if len(occupiedBookings) >= slot.Capacity {
-			return ErrCapacityFull
-		}
-
-		booking := Booking{
-			BookingNo: newBookingNo(now, input.OwnerID, input.RequestKey), RequestKey: input.RequestKey,
-			SlotID: slot.ID, OwnerID: input.OwnerID, PetID: input.PetID, AmountCents: PriceCents,
-			Status: StatusPendingPayment, HoldExpiresAt: now.Add(5 * time.Minute),
-		}
-		if err := tx.Create(&booking).Error; err != nil {
-			var mysqlErr *mysql.MySQLError
-			if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
-				// MySQL may report either unique index first. Resolve the exact
-				// meaning after rollback by looking up the request key.
-				return errUniqueRace
-			}
-			return fmt.Errorf("create booking: %w", err)
-		}
-		result = booking
-		return nil
+		})
 	})
 	if errors.Is(err, errUniqueRace) {
 		findErr := s.db.WithContext(ctx).Where("owner_id = ? AND request_key = ?", input.OwnerID, input.RequestKey).First(&result).Error
@@ -242,15 +245,82 @@ func (s *Service) ListOwnerPets(ctx context.Context, ownerID uint64) ([]Pet, err
 }
 
 func (s *Service) ExpireHolds(ctx context.Context) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error { return expireHolds(tx, s.clock.Now().UTC(), 0) })
+	now := s.clock.Now().UTC()
+	var slotIDs []uint64
+	if err := s.db.WithContext(ctx).Model(&Booking{}).
+		Distinct("slot_id").
+		Where("status = ? AND hold_expires_at <= ? AND capacity_released_at IS NULL", StatusPendingPayment, now).
+		Pluck("slot_id", &slotIDs).Error; err != nil {
+		if isRetryableMySQLError(err) {
+			return ErrTemporarilyBusy
+		}
+		return fmt.Errorf("list expired booking slots: %w", err)
+	}
+	for _, slotID := range slotIDs {
+		if err := s.expireSlotHolds(ctx, now, slotID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func expireHolds(tx *gorm.DB, now time.Time, slotID uint64) error {
 	query := tx.Model(&Booking{}).Where("status = ? AND hold_expires_at <= ? AND capacity_released_at IS NULL", StatusPendingPayment, now)
-	if slotID != 0 {
-		query = query.Where("slot_id = ?", slotID)
-	}
+	query = query.Where("slot_id = ?", slotID)
 	return query.Updates(map[string]any{"status": StatusExpired, "capacity_released_at": now, "updated_at": now, "version": gorm.Expr("version + 1")}).Error
+}
+
+func (s *Service) expireSlotHolds(ctx context.Context, now time.Time, slotID uint64) error {
+	err := withMySQLTransactionRetry(ctx, func() error {
+		return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			// Every flow that changes capacity locks the slot before its bookings.
+			// This keeps the background expiry worker in the same lock order as
+			// CreateBooking and prevents slot->booking / booking->slot deadlocks.
+			var slot ServiceSlot
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&slot, slotID).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return nil
+				}
+				return err
+			}
+			return expireHolds(tx, now, slotID)
+		})
+	})
+	if err == nil || errors.Is(err, ErrTemporarilyBusy) {
+		return err
+	}
+	return fmt.Errorf("expire booking holds for slot %d: %w", slotID, err)
+}
+
+const mysqlTransactionAttempts = 3
+
+func isRetryableMySQLError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) && (mysqlErr.Number == 1213 || mysqlErr.Number == 1205)
+}
+
+func withMySQLTransactionRetry(ctx context.Context, operation func() error) error {
+	for attempt := 0; attempt < mysqlTransactionAttempts; attempt++ {
+		err := operation()
+		if !isRetryableMySQLError(err) {
+			return err
+		}
+		if attempt+1 == mysqlTransactionAttempts || !waitForRetry(ctx, attempt) {
+			return ErrTemporarilyBusy
+		}
+	}
+	return ErrTemporarilyBusy
+}
+
+func waitForRetry(ctx context.Context, attempt int) bool {
+	timer := time.NewTimer(time.Duration(attempt+1) * 10 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func newBookingNo(now time.Time, ownerID uint64, requestKey string) string {

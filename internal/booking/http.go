@@ -186,6 +186,8 @@ func writeError(c *gin.Context, err error) {
 		status, code = http.StatusConflict, "INVALID_STATE"
 	case errors.Is(err, ErrPetNotOwned), errors.Is(err, ErrForbidden):
 		status, code = http.StatusForbidden, "FORBIDDEN"
+	case errors.Is(err, ErrTemporarilyBusy):
+		status, code = http.StatusServiceUnavailable, "SERVICE_BUSY"
 	}
 	c.JSON(status, gin.H{"error": code, "message": businessErrorMessage(err)})
 }
@@ -216,6 +218,8 @@ func businessErrorMessage(err error) string {
 		return "请求参数不正确"
 	case errors.Is(err, ErrInvalidSlotTime):
 		return "结束时间必须晚于开始时间，且开始时间必须在未来"
+	case errors.Is(err, ErrTemporarilyBusy):
+		return "预约服务繁忙，请稍后重试"
 	default:
 		return "系统暂时无法处理该操作，请稍后重试"
 	}

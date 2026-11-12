@@ -14,4 +14,5 @@ var (
 	ErrSlotOverlap         = errors.New("service slot overlaps an existing slot")
 	ErrInvalidRequest      = errors.New("invalid request")
 	ErrInvalidSlotTime     = errors.New("slot end must be after start and start must be in the future")
+	ErrTemporarilyBusy     = errors.New("booking service is temporarily busy")
 )
