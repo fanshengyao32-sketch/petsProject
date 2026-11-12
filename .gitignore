@@ -1,0 +1,24 @@
+# Go
+/bin/
+/dist/
+*.test
+*.out
+!coverage.out
+coverage*.html
+coverage*.txt
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Runtime data
+/tmp/
+/data/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+

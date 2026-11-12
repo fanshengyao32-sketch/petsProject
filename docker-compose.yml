@@ -1,0 +1,72 @@
+name: petsproject
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: pet_booking
+      MYSQL_USER: pet_app
+      MYSQL_PASSWORD: pet_app_password
+      MYSQL_ROOT_PASSWORD: local_root_password
+      TZ: UTC
+    command:
+      - --sql-mode=STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
+      - --default-time-zone=+00:00
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-plocal_root_password"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  mock-payment:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock-payment
+    environment:
+      MOCK_PAYMENT_ADDR: :8081
+      MOCK_PAYMENT_CALLBACK_SECRET: local-compose-secret
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      APP_ENV: development
+      HTTP_ADDR: :8080
+      MYSQL_DSN: pet_app:pet_app_password@tcp(mysql:3306)/pet_booking?charset=utf8mb4&parseTime=True&loc=UTC
+      STORE_TIMEZONE: Asia/Shanghai
+      TEACHING_CLOCK_ENABLED: "false"
+      PAYMENT_PROVIDER: mock
+      MOCK_PAYMENT_BASE_URL: http://mock-payment:8081
+      PAYMENT_CALLBACK_URL: http://app:8080/api/payment/notifications/mock
+      MOCK_PAYMENT_CALLBACK_SECRET: local-compose-secret
+    ports:
+      - "8080:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      mock-payment:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  mysql_data:
+
