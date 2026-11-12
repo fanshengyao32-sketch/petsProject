@@ -1,0 +1,141 @@
+name: 持续集成
+
+on:
+  push:
+    branches:
+      - main
+      - dev/02
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-gate:
+    name: 质量门禁
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci_root_password
+          TZ: UTC
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pci_root_password"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=30
+
+    env:
+      MYSQL_TEST_DSN: "root:ci_root_password@tcp(127.0.0.1:3306)/pet_booking_ci_booking?charset=utf8mb4&parseTime=True&loc=UTC"
+      MYSQL_CANCELLATION_TEST_DSN: "root:ci_root_password@tcp(127.0.0.1:3306)/pet_booking_ci_cancellation?charset=utf8mb4&parseTime=True&loc=UTC"
+      MYSQL_PAYMENT_TEST_DSN: "root:ci_root_password@tcp(127.0.0.1:3306)/pet_booking_ci_payment?charset=utf8mb4&parseTime=True&loc=UTC"
+      MYSQL_FULFILLMENT_TEST_DSN: "root:ci_root_password@tcp(127.0.0.1:3306)/pet_booking_ci_fulfillment?charset=utf8mb4&parseTime=True&loc=UTC"
+      MYSQL_CLOSING_TEST_DSN: "root:ci_root_password@tcp(127.0.0.1:3306)/pet_booking_ci_closing?charset=utf8mb4&parseTime=True&loc=UTC"
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.0"
+          cache: true
+
+      - name: 安装 MySQL 客户端
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes default-mysql-client
+
+      - name: 创建测试库并执行迁移
+        env:
+          MYSQL_PWD: ci_root_password
+        run: |
+          set -euo pipefail
+          databases=(
+            pet_booking_ci_booking
+            pet_booking_ci_cancellation
+            pet_booking_ci_payment
+            pet_booking_ci_fulfillment
+            pet_booking_ci_closing
+          )
+          for database in "${databases[@]}"; do
+            mysql -h 127.0.0.1 -uroot --execute="CREATE DATABASE IF NOT EXISTS \`${database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;"
+            for migration in migrations/*.sql; do
+              mysql -h 127.0.0.1 -uroot "${database}" < "${migration}"
+            done
+          done
+
+      - name: 检查 Go 格式
+        run: |
+          set -euo pipefail
+          unformatted="$(gofmt -l cmd internal)"
+          if [[ -n "${unformatted}" ]]; then
+            echo "以下文件未通过 gofmt："
+            echo "${unformatted}"
+            exit 1
+          fi
+
+      - name: 静态检查
+        run: go vet ./...
+
+      - name: 全量测试（真实 MySQL）
+        run: go test -count=1 ./...
+
+      - name: 覆盖率门禁
+        run: |
+          set -euo pipefail
+
+          check_coverage() {
+            local profile="$1"
+            local required="$2"
+            local label="$3"
+            local actual
+            actual="$(go tool cover -func="${profile}" | awk '/^total:/ {gsub("%", "", $3); print $3}')"
+            if [[ -z "${actual}" ]]; then
+              echo "无法读取 ${label} 覆盖率"
+              exit 1
+            fi
+            echo "${label}: ${actual}%（要求 >= ${required}%）"
+            awk -v actual="${actual}" -v required="${required}" 'BEGIN { exit !(actual + 0 >= required + 0) }'
+          }
+
+          go test -count=1 -coverpkg=./... -coverprofile=coverage.out ./...
+          check_coverage coverage.out 85 "整体覆盖率"
+
+          for package in booking cancellation payment fulfillment closing; do
+            profile="coverage-${package}.out"
+            go test -count=1 -coverprofile="${profile}" "./internal/${package}"
+            check_coverage "${profile}" 85 "internal/${package}"
+          done
+
+      - name: 竞争检测
+        run: go test -race -count=1 ./...
+
+      - name: 编译 Go 程序
+        run: go build ./...
+
+      - name: 构建容器镜像
+        run: |
+          docker build --tag petsproject-app:${{ github.sha }} --file Dockerfile .
+          docker build --tag petsproject-mock-payment:${{ github.sha }} --file Dockerfile.mock-payment .
+
+      - name: 保存覆盖率原始文件
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.sha }}
+          path: coverage*.out
+          if-no-files-found: error
+          retention-days: 14
