@@ -153,7 +153,13 @@ func (m *mockServer) triggerNotification(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if err := m.sendNotification(payment, payload.Duplicate); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		// The provider error may contain the callback URL, query parameters or
+		// network details. Keep the external response stable and non-sensitive.
+		log.Printf("mock payment notification delivery failed request_no=%s", payload.RequestNo)
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error":   "NOTIFICATION_DELIVERY_FAILED",
+			"message": "支付结果通知发送失败，请稍后重试",
+		})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
